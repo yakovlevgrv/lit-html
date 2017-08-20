@@ -83,9 +83,9 @@ suite('lit-html', () => {
       const result = html`<div a="${1}" b="${2}"></div>`;
       const parts = result.template.parts;
       assert.equal(parts.length, 2);
-      const instance = new TemplateInstance(result.template);
-      instance._clone();
-      assert.equal(instance._parts.length, 2);
+      // const instance = new TemplateInstance(result.template);
+      // instance._clone();
+      // assert.equal(instance._parts.length, 2);
     });
 
     test('updates when called multiple times with arrays', () => {
@@ -483,11 +483,11 @@ suite('lit-html', () => {
       // attribute names from the template strings, we can retreive the original
       // case of the names!
 
-      const partCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node): Part => {
+      const partCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node, endNode?: Node): Part => {
           if (templatePart.type === 'attribute') {
             return new PropertyPart(instance, node as Element, templatePart.rawName!, templatePart.strings!);
           }
-          return defaultPartCallback(instance, templatePart, node);
+          return defaultPartCallback(instance, templatePart, node, endNode);
         };
 
       class PropertyPart extends AttributePart {

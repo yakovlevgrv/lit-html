@@ -45,7 +45,7 @@ export function render(result: TemplateResult, container: Element|DocumentFragme
   baseRender(result, container, extendedPartCallback);
 }
 
-export const extendedPartCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node): Part => {
+export const extendedPartCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node, endNode?: Node): Part => {
   if (templatePart.type === 'attribute') {
     if (templatePart.rawName!.startsWith('on-')) {
       const eventName = templatePart.rawName!.substring(3);
@@ -57,7 +57,7 @@ export const extendedPartCallback = (instance: TemplateInstance, templatePart: T
     }
     return new PropertyPart(instance, node as Element, templatePart.rawName!, templatePart.strings!);
   }
-  return defaultPartCallback(instance, templatePart, node);
+  return defaultPartCallback(instance, templatePart, node, endNode);
 };
 
 

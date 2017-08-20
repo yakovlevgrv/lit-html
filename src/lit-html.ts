@@ -52,7 +52,7 @@ export class TemplateResult {
  */
 export function render(result: TemplateResult, container: Element|DocumentFragment,
     partCallback: PartCallback = defaultPartCallback) {
-  let instance = (container as any).__templateInstance as any;
+  let instance = (container as any).__templateInstance as TemplateInstance;
 
   // Repeat render, just call update()
   if (instance !== undefined &&
@@ -66,13 +66,10 @@ export function render(result: TemplateResult, container: Element|DocumentFragme
   instance = new TemplateInstance(result.template, partCallback);
   (container as any).__templateInstance = instance;
 
-  const fragment = instance._clone();
-  instance.update(result.values);
-
   while (container.firstChild) {
     container.removeChild(container.firstChild);
   }
-  container.appendChild(fragment);
+  instance._cloneInto(container, result.values);
 }
 
 const exprMarker = '{{}}';
@@ -95,12 +92,16 @@ const exprMarker = '{{}}';
  */
 export class TemplatePart {
   constructor(
-    public type: string,
+    public type: 'attribute' | 'node',
     public index: number,
     public name?: string,
     public rawName?: string,
     public strings?: string[]) {
   }
+  get size() {
+    return this.strings === undefined ? 1 : (this.strings.length - 1);
+  }
+  // TODO: store value index here too?
 }
 
 export class Template {
@@ -266,6 +267,7 @@ export class NodePart extends Part implements SinglePart {
   private _previousValue: any;
 
   constructor(instance: TemplateInstance, startNode: Node, endNode: Node) {
+    console.assert(startNode.parentNode != null);
     super(instance);
     this.startNode = startNode;
     this.endNode = endNode;
@@ -297,7 +299,12 @@ export class NodePart extends Part implements SinglePart {
   }
 
   private _insert(node: Node) {
-    this.endNode.parentNode!.insertBefore(node, this.endNode);
+    if (this.endNode.parentNode === null) {
+      // console.log('appending A', node);
+      this.startNode.parentNode!.appendChild(node);
+    } else {
+      this.endNode.parentNode!.insertBefore(node, this.endNode);
+    }
   }
 
   private _setNode(value: Node): void {
@@ -307,7 +314,7 @@ export class NodePart extends Part implements SinglePart {
   }
 
   private _setText(value: string): void {
-    if (this.startNode.nextSibling! === this.endNode.previousSibling! &&
+    if (this.startNode.nextSibling && this.startNode.nextSibling! === this.endNode.previousSibling! &&
         this.startNode.nextSibling!.nodeType === Node.TEXT_NODE) {
       // If we only have a single text node between the markers, we can just
       // set its value, rather than replacing it.
@@ -323,13 +330,19 @@ export class NodePart extends Part implements SinglePart {
   private _setTemplateResult(value: TemplateResult): void {
     let instance: TemplateInstance;
     if (this._previousValue && this._previousValue.template === value.template) {
-      instance = this._previousValue;
+      this._previousValue.update(value.values);
     } else {
       instance = new TemplateInstance(value.template, this.instance._partCallback);
-      this._setNode(instance._clone());
+      if (this.startNode.nextSibling === undefined) {
+        instance._cloneInto(this.startNode.parentNode!, value.values);
+      } else {
+        const fragment = document.createDocumentFragment();
+        instance._cloneInto(fragment, value.values);
+        this._setNode(fragment);
+      }
       this._previousValue = instance;
     }
-    instance.update(value.values);
+    
   }
 
   private _setIterable(value: any): void {
@@ -409,13 +422,13 @@ export class NodePart extends Part implements SinglePart {
 }
 
 
-export type PartCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node) => Part;
+export type PartCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node, endNode?: Node) => Part;
 
-export const defaultPartCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node): Part => {
+export const defaultPartCallback = (instance: TemplateInstance, templatePart: TemplatePart, node: Node, endNode?: Node): Part => {
   if (templatePart.type === 'attribute') {
     return new AttributePart(instance, node as Element, templatePart.name!, templatePart.strings!);
   } else if (templatePart.type === 'node') {
-    return new NodePart(instance, node, node.nextSibling!);
+    return new NodePart(instance, node, endNode!);
   }
   throw new Error(`Unknown part type ${templatePart.type}`);
 }
@@ -434,6 +447,60 @@ export class TemplateInstance {
     this._partCallback = partCallback;
   }
 
+  _cloneInto(container: Node, values: any[]) {
+    console.assert(container != null);
+
+    const parts = this.template.parts;
+    let index = -1;
+    let partIndex = 0;
+    let templatePart = parts[0];
+    let valueIndex = 0;
+
+    /*
+     * This populates the parts array by traversing the template with a
+     * recursive DFS, and giving each part a path of indices from the root of
+     * the template to the target node.
+     */
+    const walk = (templateNode: Node, instanceNode: Node): boolean => {
+      // console.log('walk', index);
+      let endNode;
+      while (templatePart !== undefined && index === templatePart.index) {
+        if (templatePart.type === 'node') {
+          endNode = new Text();
+        }
+        const part = this._partCallback(this, templatePart, instanceNode, endNode);
+        this._parts.push(part);
+        if (part.size === undefined) {
+          (part as SinglePart).setValue(values[valueIndex]);
+        } else {
+          (part as MultiPart).setValue(values, valueIndex);
+        }
+        valueIndex += part.size || 1;
+        templatePart = parts[++partIndex];
+      }
+      if (templateNode.hasChildNodes()) {
+        let child = templateNode.firstChild;
+        let skip = false;
+        while (child !== null) {
+          index++;
+          const clone = document.importNode(child, false);
+          // console.log('appending B', clone);
+          instanceNode.appendChild(clone);
+          console.assert(clone.parentNode != null);
+
+          skip = !skip && walk(child, clone);
+          child = child.nextSibling;
+        }
+      }
+      if (endNode !== undefined) {
+        // console.log('appending C', endNode);
+        instanceNode.parentNode!.appendChild(endNode);
+      }
+      return false;
+    }
+    walk(this.template.element.content, container);
+  }
+
   update(values: any[]) {
     let valueIndex = 0;
     for (const part of this._parts) {
@@ -447,28 +514,28 @@ export class TemplateInstance {
     }
   }
 
-  _clone(): DocumentFragment {
-    const fragment = document.importNode(this.template.element.content, true);
+  // _clone(): DocumentFragment {
+  //   const fragment = document.importNode(this.template.element.content, true);
 
-    if (this.template.parts.length > 0) {
-      const walker = document.createTreeWalker(fragment, 5 /* elements & text */);
+  //   if (this.template.parts.length > 0) {
+  //     const walker = document.createTreeWalker(fragment, 5 /* elements & text */);
 
-      const parts = this.template.parts;
-      let index = 0;
-      let partIndex = 0;
-      let templatePart = parts[0];
-      let node = walker.nextNode();
-      while (node != null && partIndex < parts.length) {
-        if (index === templatePart.index) {
-          this._parts.push(this._partCallback(this, templatePart, node));
-          templatePart = parts[++partIndex];
-        } else {
-          index++;
-          node = walker.nextNode();
-        }
-      }
-    }
-    return fragment;
-  }
+  //     const parts = this.template.parts;
+  //     let index = 0;
+  //     let partIndex = 0;
+  //     let templatePart = parts[0];
+  //     let node = walker.nextNode();
+  //     while (node != null && partIndex < parts.length) {
+  //       if (index === templatePart.index) {
+  //         this._parts.push(this._partCallback(this, templatePart, node));
+  //         templatePart = parts[++partIndex];
+  //       } else {
+  //         index++;
+  //         node = walker.nextNode();
+  //       }
+  //     }
+  //   }
+  //   return fragment;
+  // }
 
 }

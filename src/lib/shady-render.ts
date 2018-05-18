@@ -12,8 +12,7 @@
  * http://polymer.github.io/PATENTS.txt
  */
 
-import {render as baseRender, Template, templateCaches, TemplateResult, renderToDom} from '../lit-html.js';
-import {removeNodesFromTemplate, insertNodeIntoTemplate} from './modify-template.js';
+import {render as baseRender, Template, templateCaches, TemplateResult} from '../lit-html.js';
 
 export {html, svg, TemplateResult} from '../lit-html.js';
 
@@ -38,31 +37,85 @@ const shadyTemplateFactory = (scopeName: string) =>
   let template = templateCache.get(result.strings);
   if (template === undefined) {
     const element = result.getTemplateElement();
-    window.ShadyCSS.prepareTemplateDom(element, scopeName);
+    if (typeof window.ShadyCSS === 'object') {
+      window.ShadyCSS.prepareTemplateDom(element, scopeName);
+    }
     template = new Template(result, element);
     templateCache.set(result.strings, template);
   }
   return template;
 };
 
-const TEMPLATE_TYPES = ['html', 'svg'];
-function removeStylesFromLitTemplates(scopeName: string) {
-  TEMPLATE_TYPES.forEach((type) => {
-    const templates = templateCaches.get(`${type}--${scopeName}`);
-    if (templates) {
-      templates.forEach((template) => {
-        const {element: {content}} = template;
-        const styles = content.querySelectorAll('style');
-        removeNodesFromTemplate(template, Array.from(styles));
-      });
+// 1. crawl template for styles and extract them, recursing into nested template results.
+// 2. fix part indexes so parts stay in sync.
+function extractStylesFromTemplate(styleTemplate: HTMLTemplateElement,
+    templateFactory: Function, result: TemplateResult) {
+  const {element: {content}, parts} = templateFactory(result);
+  const walker = document.createTreeWalker(
+    content,
+    NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_COMMENT |
+        NodeFilter.SHOW_TEXT,
+    null as any,
+    false);
+  let partIndex = 0;
+  let part = parts[partIndex];
+  let partDelta = 0;
+  let disableUntil = 0;
+  let index = -1;
+  const nodesToRemove: Node[] = [];
+  while (walker.nextNode()) {
+    index++;
+    const node = walker.currentNode as Element;
+    if (node.localName === 'style') {
+      const removeCount = node.childNodes.length + 1;
+      disableUntil = index + removeCount;
+      partDelta -= removeCount;
+      styleTemplate.content.appendChild(node.cloneNode(true));
+      nodesToRemove.push(node);
+    }
+    if (part && part.index === index) {
+      if (index < disableUntil) {
+        part.index = -1;
+      } else {
+        part.index += partDelta;
+      }
+      const value = result.values[partIndex];
+      extractStylesFromValue(styleTemplate, templateFactory, value);
+      partIndex++;
+      part = parts[partIndex];
+    }
+  }
+  nodesToRemove.forEach((n) => n.parentNode!.removeChild(n));
+}
+
+// TODO(sorvell): brittle because value may be lots of things, e.g.
+// should we support node values?
+function extractStylesFromValue(styleTemplate: HTMLTemplateElement,
+    templateFactory: Function, value: any) {
+  if (value instanceof TemplateResult) {
+    extractStylesFromTemplate(styleTemplate, templateFactory, value);
+  } else if ((Array.isArray(value) || typeof value !== 'string' && value[Symbol.iterator])) {
+    for (const item of value) {
+      extractStylesFromValue(styleTemplate, templateFactory, item);
+    }
+  }
+}
+
+function insertStyleInTemplate(template: Template, style: HTMLStyleElement) {
+  const {element: {content}} = template;
+  content.insertBefore(style, content.firstChild);
+  const adjustIndex = 1 + style.childNodes.length;
+  template.parts.forEach((part) => {
+    if (part.index >= 0) {
+      part.index+= adjustIndex;
     }
   });
 }
 
-const needsShadyStyling = window.ShadyCSS && (!window.ShadyCSS.nativeShadow ||
-  window.ShadyCSS.ApplyShim);
-
 const shadyRenderSet = new Set<string>();
+
+const needsStyleFixup = window.ShadyCSS && (!window.ShadyCSS.nativeShadow ||
+  window.ShadyCSS.ApplyShim);
 
 function hostForNode(node: Node) {
   return node.nodeType === Node.DOCUMENT_FRAGMENT_NODE && (node as ShadowRoot).host
@@ -73,35 +126,23 @@ export function render(
     container: Element|DocumentFragment,
     scopeName: string) {
   const host = hostForNode(container);
-  if (needsShadyStyling && host) {
+  if (needsStyleFixup && host) {
     const templateFactory = shadyTemplateFactory(scopeName);
-    const renderer = (container: Element|DocumentFragment, fragment: DocumentFragment) => {
-      if (!shadyRenderSet.has(scopeName)) {
-        shadyRenderSet.add(scopeName);
-        const styleTemplate = document.createElement('template');
-        Array.from(fragment.querySelectorAll('style')).forEach((s: Element) => {
-          styleTemplate.content.appendChild(s);
-        });
-        window.ShadyCSS.prepareTemplateStyles(styleTemplate, scopeName);
-        // fix templates.
-        removeStylesFromLitTemplates(scopeName);
-        // ApplyShim case.
-        if (window.ShadyCSS.nativeShadow) {
-          const style = styleTemplate.content.querySelector('style');
-          if (style) {
-            // insert style into rendered fragment
-            fragment.insertBefore(style, fragment.firstChild);
-            // insert into lit-template (for subsequent renders)
-            const template = templateFactory(result);
-            insertNodeIntoTemplate(template, style.cloneNode(true),
-                template.element.content.firstChild);
-          }
+    if (!shadyRenderSet.has(scopeName)) {
+      shadyRenderSet.add(scopeName);
+      const styleTemplate = document.createElement('template');
+      extractStylesFromTemplate(styleTemplate, templateFactory, result);
+      window.ShadyCSS.prepareTemplateStyles(styleTemplate, scopeName);
+      // when using ApplyShim
+      if (window.ShadyCSS.nativeShadow) {
+        const style = styleTemplate.content.querySelector('style');
+        if (style) {
+          insertStyleInTemplate(templateFactory(result), style);
         }
       }
-      window.ShadyCSS.styleElement(host);
-      renderToDom(container, fragment);
     }
-    return baseRender(result, container, templateFactory, renderer);
+    window.ShadyCSS.styleElement(host);
+    return baseRender(result, container, templateFactory);
   } else {
     return baseRender(result, container);
   }
